@@ -1,250 +1,347 @@
--- FILE: main_loops_example.lua
--- MẪU LOOP KIỂU A – DÙNG CHO main.lua HOẶC AnimeScript_FINAL.lua
+-- ========================================================
+-- file: main.lua
+-- ========================================================
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
 
--- Giả sử có:
---   config.features.xxx
---   isRunning / state.isRunning
---   utils:...  (với bản module)
--- Với AnimeScript_FINAL.lua bạn đổi tên cho khớp (CONFIG vs config, state vs isRunning).
+return function(ctx)
+  local CONFIG = ctx.config
+  local Utils = ctx.utils
+  local UI = ctx.ui
+  local Webhook = ctx.webhook
 
-local function smoothWait(base, jitterPercent)
-    -- jitter nhẹ ±% để anti-ban nhưng không lag
-    jitterPercent = jitterPercent or 0.2
-    if base <= 0 then
-        task.wait()
-        return
+  Utils.init(CONFIG)
+  Webhook.init(CONFIG)
+
+  local state = {
+    running = false,
+    farmThread = nil,
+    chestThread = nil,
+    xmasThread = nil,
+    skillThread = nil,
+    dungeonThread = nil,
+    mugenThread = nil,
+    lastBossSeenAt = os.clock(),
+  }
+
+  local stats = {
+    enabled = CONFIG.stats.enabled,
+    kills = 0,
+    bossKills = 0,
+    chests = 0,
+    startTime = os.clock(),
+  }
+
+  local uiInfo
+
+  local function formatTime(seconds)
+    local m = math.floor(seconds / 60)
+    local s = math.floor(seconds % 60)
+    return string.format("%02d:%02d", m, s)
+  end
+
+  local function updateStatsLabel()
+    if not stats.enabled or not uiInfo or not uiInfo.statsLabel then
+      return
     end
-    local delta = base * jitterPercent
-    local offset = (math.random() * 2 - 1) * delta
-    local delay = math.max(0, base + offset)
-    task.wait(delay)
-end
+    local elapsed = os.clock() - stats.startTime
+    uiInfo.statsLabel.Text = string.format(
+      "Kills: %d | Boss: %d | Chest: %d | Time: %s",
+      stats.kills,
+      stats.bossKills,
+      stats.chests,
+      formatTime(elapsed)
+    )
+  end
 
-----------------------------------------------------------------------
--- AUTO CLICK (MODULE STYLE)
-----------------------------------------------------------------------
+  local function setStatus(text)
+    if uiInfo and uiInfo.statusLabel then
+      uiInfo.statusLabel.Text = text
+      if text == "RUNNING" then
+        uiInfo.statusLabel.TextColor3 = Color3.fromRGB(52, 211, 153)
+      else
+        uiInfo.statusLabel.TextColor3 = Color3.fromRGB(148, 163, 184)
+      end
+    end
+  end
 
-local function loopAutoClick(config, utils)
-    task.spawn(function()
-        while true do
-            if isRunning and config.features.autoClick and utils:isAlive() then
-                -- click base delay ±20%
-                local base = config.click.autoClickSpeed
-                smoothWait(base, 0.2)
+  local function shouldBossHop()
+    if not CONFIG.features.autoHop or not CONFIG.hop.enableBossHop then
+      return false
+    end
+    local now = os.clock()
+    local diff = now - (state.lastBossSeenAt or now)
+    return diff >= CONFIG.hop.noBossSeconds
+  end
 
-                -- random hành vi nhẹ
-                if math.random() < config.click.randomClickChance then
-                    smoothWait(base * 2, 0.1)
-                end
-            else
-                -- feature off hoặc chết → nghỉ 0.2s để không tốn CPU
-                task.wait(0.2)
-            end
+  local function markBossSeen()
+    state.lastBossSeenAt = os.clock()
+  end
+
+  local function farmSingleTarget(findFn, labelName)
+    if not Utils.isAlive() then
+      return
+    end
+    local model, hum, hrp = findFn()
+    if not model or not hum or not hrp or hum.Health <= 0 then
+      return
+    end
+
+    if labelName == "boss" then
+      markBossSeen()
+    end
+
+    Utils.tweenToTarget(hrp)
+    Utils.basicAttack()
+
+    local hpBefore = hum.Health
+    task.wait(Utils.jitterDelay(CONFIG.timing.attackSpeed))
+    if hum.Health <= 0 and hpBefore > 0 then
+      if labelName == "boss" then
+        stats.bossKills += 1
+        Webhook.sendBossKill(stats, model.Name)
+      else
+        stats.kills += 1
+      end
+    end
+  end
+
+  local function chestStep()
+    local chestObj = Utils.findChest()
+    if not chestObj then
+      return
+    end
+    local pos = chestObj.Position or (chestObj:IsA("Model") and chestObj:GetPivot().Position)
+    if not pos then
+      return
+    end
+    Utils.tweenToTarget({ Position = pos })
+    if Utils.fireChest(chestObj) then
+      stats.chests += 1
+    end
+    task.wait(Utils.jitterDelay(CONFIG.timing.chestDelay))
+  end
+
+  local function runFarmLoop()
+    if state.farmThread then
+      return
+    end
+    state.farmThread = task.spawn(function()
+      while state.running do
+        if not Utils.isAlive() then
+          task.wait(0.5)
+        else
+          if CONFIG.features.autoBoss then
+            farmSingleTarget(Utils.findNearestBoss, "boss")
+          elseif CONFIG.features.autoFarm then
+            farmSingleTarget(Utils.findNearestMob, "mob")
+          end
+
+          if shouldBossHop() then
+            Utils.hopServer("No boss detected")
+            break
+          end
         end
+        task.wait(Utils.jitterDelay(CONFIG.timing.attackSpeed))
+      end
+      state.farmThread = nil
     end)
-end
+  end
 
-----------------------------------------------------------------------
--- AUTO SKILL
-----------------------------------------------------------------------
-
-local function loopAutoSkill(config, utils)
-    task.spawn(function()
-        local skillIndex = 1
-
-        while true do
-            if isRunning and config.features.autoSkill and utils:isAlive() then
-                local skill = config.skill.sequence[skillIndex]
-                if skill then
-                    local ok, err = pcall(function()
-                        utils:castSkill(skill)
-                    end)
-                    if not ok then
-                        utils:log("Skill cast error: " .. tostring(err), "WARN")
-                    end
-                end
-
-                skillIndex = (skillIndex % #config.skill.sequence) + 1
-                smoothWait(config.antiBan.skillDelay.min or 0.5, 0.15)
-            else
-                task.wait(0.2)
-            end
+  local function runChestLoop()
+    if state.chestThread then
+      return
+    end
+    state.chestThread = task.spawn(function()
+      while state.running do
+        if CONFIG.features.autoChest
+          and not CONFIG.features.autoXmasChest
+          and Utils.isAlive()
+        then
+          chestStep()
+        else
+          task.wait(0.5)
         end
+      end
+      state.chestThread = nil
     end)
-end
+  end
 
-----------------------------------------------------------------------
--- FARM + BOSS PRIORITY
--- Quy ước: nếu autoBoss ON → ưu tiên boss, farm chỉ chạy khi không thấy boss.
-----------------------------------------------------------------------
-
-local function loopAutoFarmAndBoss(config, utils, webhook)
-    task.spawn(function()
-        while true do
-            if not isRunning or not utils:isAlive() then
-                task.wait(0.3)
-            else
-                -- Nếu đang bật autoBoss → check boss trước
-                if config.features.autoBoss then
-                    local boss = nil
-                    local okBoss, bossResult = pcall(function()
-                        local targets = config.boss.farmAllBosses and
-                            {"Boss", "Mini Boss", "Raid Boss", "Dragon", "Titan"} or
-                            config.boss.targetBosses
-                        return utils:findNearestBoss(targets, config.boss.bossDetectRadius)
-                    end)
-
-                    if okBoss then boss = bossResult end
-
-                    if boss then
-                        local rootPart = boss:FindFirstChild("HumanoidRootPart")
-                        if rootPart then
-                            utils:teleportTo(rootPart.Position + Vector3.new(0, 0, -20), 50)
-
-                            utils:humanizedAction(function()
-                                utils:attackEnemy(boss)
-                            end, config.antiBan.clickDelay)
-
-                            -- webhook (nếu dùng module)
-                            if webhook and config.webhook.enabled and config.webhook.url ~= "" and config.webhook.logBoss then
-                                pcall(function()
-                                    webhook:logBossKill(config.webhook.url, boss.Name, "TBD")
-                                end)
-                            end
-                        end
-
-                        smoothWait(config.antiBan.detectionCheckInterval, 0.15)
-                        -- CHÚ Ý: có boss thì không farm thường ở tick này
-                        goto continue_loop
-                    end
-                end
-
-                -- Nếu tới đây: hoặc autoBoss off, hoặc không tìm được boss → farm thường
-                if config.features.autoFarm then
-                    local enemy = nil
-                    local okEnemy, enemyResult = pcall(function()
-                        local targets = config.farm.autoFarmAllMonsters and
-                            {"Bandit", "Pirate", "Zombie", "Skeleton", "Ghost"} or
-                            config.farm.targetMonsters
-                        return utils:findNearestEnemy(targets, config.farm.farmDistance)
-                    end)
-
-                    if okEnemy then enemy = enemyResult end
-
-                    if enemy then
-                        local hrp = enemy:FindFirstChild("HumanoidRootPart")
-                        if hrp then
-                            local offset = Vector3.new(math.random(-15, 15), 0, math.random(-15, 15))
-                            utils:teleportTo(hrp.Position + offset, 30)
-
-                            utils:humanizedAction(function()
-                                utils:attackEnemy(enemy)
-                            end, config.antiBan.clickDelay)
-                        end
-                    end
-                end
-
-                smoothWait(config.antiBan.detectionCheckInterval, 0.15)
+  local function runXmasLoop()
+    if state.xmasThread then
+      return
+    end
+    state.xmasThread = task.spawn(function()
+      local lastSeen = os.clock()
+      local timeout = (CONFIG.xmasChest and CONFIG.xmasChest.hopTimeout) or 10
+      while state.running do
+        if CONFIG.features.autoXmasChest and Utils.isAlive() then
+          local chest = Utils.findChristmasChest()
+          if chest then
+            lastSeen = os.clock()
+            Utils.tweenToTarget(chest)
+            if Utils.fireChest(chest) then
+              stats.chests += 1
             end
-
-            ::continue_loop::
-        end
-    end)
-end
-
-----------------------------------------------------------------------
--- AUTO CHEST
-----------------------------------------------------------------------
-
-local function loopAutoChest(config, utils)
-    task.spawn(function()
-        while true do
-            if isRunning and config.features.autoChest and utils:isAlive() then
-                local ok, workspaceObj = pcall(function()
-                    return game:GetService("Workspace")
-                end)
-
-                if ok and workspaceObj then
-                    for _, chest in pairs(workspaceObj:GetChildren() or {}) do
-                        if chest:IsA("Model") and string.find(chest.Name:lower(), "chest") then
-                            local rootPart = chest:FindFirstChild("HumanoidRootPart")
-                            local playerRoot = utils:getRootPart()
-
-                            if rootPart and playerRoot then
-                                local dist = (rootPart.Position - playerRoot.Position).Magnitude
-                                if dist < config.gameplay.chestDetectRadius then
-                                    utils:teleportTo(rootPart.Position, 40)
-                                    utils:humanizedAction(function()
-                                        -- TODO: nếu cần fireproximityprompt / clickdetector
-                                    end, config.antiBan.clickDelay)
-                                end
-                            end
-                        end
-                    end
-                end
-                task.wait(5)
-            else
-                task.wait(0.5)
+            task.wait(Utils.jitterDelay(CONFIG.timing.chestDelay))
+          else
+            if CONFIG.xmasChest and CONFIG.xmasChest.hopIfMissing then
+              local diff = os.clock() - lastSeen
+              if diff >= timeout then
+                Utils.hopServer("No Christmas chest for " .. math.floor(diff) .. "s")
+                break
+              end
             end
+            task.wait(0.5)
+          end
+        else
+          task.wait(0.5)
         end
+      end
+      state.xmasThread = nil
     end)
-end
+  end
 
-----------------------------------------------------------------------
--- AUTO REJOIN
-----------------------------------------------------------------------
+  local function runSkillLoop()
+    if state.skillThread then
+      return
+    end
+    state.skillThread = task.spawn(function()
+      while state.running do
+        if CONFIG.features.autoSkill and Utils.isAlive() then
+          Utils.castSkills()
+          if CONFIG.features.autoBoss then
+            Utils.swapFruit()
+          end
+          task.wait(Utils.jitterDelay(CONFIG.timing.skillDelay))
+        else
+          task.wait(0.3)
+        end
+      end
+      state.skillThread = nil
+    end)
+  end
 
-local function loopAutoRejoin(config, utils)
-    task.spawn(function()
-        while true do
-            if isRunning and config.features.autoRejoin then
-                task.wait(config.rejoin.autoRejoinTime)
-
-                local shouldRejoin = false
-
-                if config.rejoin.rejoinOnNoBoss then
-                    local ok, boss = pcall(function()
-                        return utils:findNearestBoss(config.boss.targetBosses)
-                    end)
-                    if ok and not boss then
-                        utils:log("No boss found, auto rejoining.", "WARN")
-                        shouldRejoin = true
-                    end
-                else
-                    utils:log("Time elapsed, auto rejoining.", "WARN")
-                    shouldRejoin = true
-                end
-
-                if shouldRejoin then
-                    task.wait(math.random(config.rejoin.rejoinDelay.min, config.rejoin.rejoinDelay.max))
-                    local ok, TeleportService = pcall(function()
-                        return game:GetService("TeleportService")
-                    end)
-                    if ok and TeleportService then
-                        TeleportService:Teleport(game.PlaceId)
-                    end
-                end
+  local function runDungeonLoop()
+    if state.dungeonThread then
+      return
+    end
+    state.dungeonThread = task.spawn(function()
+      while state.running do
+        if CONFIG.features.autoDungeon and Utils.isAlive() then
+          local bossModel, bossHum, bossRoot = Utils.findNearestDungeonBoss()
+          if bossModel and bossHum and bossRoot then
+            farmSingleTarget(Utils.findNearestDungeonBoss, "boss")
+          else
+            local mobModel, mobHum, mobRoot = Utils.findNearestDungeonMob()
+            if mobModel and mobHum and mobRoot then
+              farmSingleTarget(Utils.findNearestDungeonMob, "mob")
             else
-                task.wait(1)
+              task.wait(0.4)
             end
+          end
+        else
+          task.wait(0.5)
         end
+      end
+      state.dungeonThread = nil
     end)
-end
+  end
 
-----------------------------------------------------------------------
--- HÀM KHỞI ĐỘNG CHUNG (thay cho main:start hiện tại)
-----------------------------------------------------------------------
+  local function runMugenLoop()
+    if state.mugenThread then
+      return
+    end
+    state.mugenThread = task.spawn(function()
+      while state.running do
+        if CONFIG.features.autoMugen and Utils.isAlive() then
+          local bossModel, bossHum, bossRoot = Utils.findNearestMugenBoss()
+          if bossModel and bossHum and bossRoot then
+            farmSingleTarget(Utils.findNearestMugenBoss, "boss")
+          else
+            local mobModel, mobHum, mobRoot = Utils.findNearestMugenMob()
+            if mobModel and mobHum and mobRoot then
+              farmSingleTarget(Utils.findNearestMugenMob, "mob")
+            else
+              task.wait(0.4)
+            end
+          end
+        else
+          task.wait(0.5)
+        end
+      end
+      state.mugenThread = nil
+    end)
+  end
 
-local function startAllFeatures(config, utils, webhook)
-    -- validate & log vẫn giữ nguyên như main:start cũ
-    config:validate()
-    utils:log("Starting auto farm features (loop style A).", "INFO")
+  local function startRuntime()
+    if state.running then
+      return
+    end
+    state.running = true
+    stats.startTime = os.clock()
+    setStatus("RUNNING")
 
-    loopAutoClick(config, utils)
-    loopAutoSkill(config, utils)
-    loopAutoFarmAndBoss(config, utils, webhook)
-    loopAutoChest(config, utils)
-    loopAutoRejoin(config, utils)
+    runFarmLoop()
+    runChestLoop()
+    runXmasLoop()
+    runSkillLoop()
+    runDungeonLoop()
+    runMugenLoop()
+  end
 
-    utils:log("All loops initialized!", "SUCCESS")
+  local function stopRuntime()
+    if not state.running then
+      return
+    end
+    state.running = false
+    setStatus("STOPPED")
+  end
+
+  local callbacks = {}
+
+  function callbacks.onFeatureToggle(key, value)
+    CONFIG.features[key] = value
+    if key == "autoBoss" and value then
+      CONFIG.features.autoFarm = false
+    end
+    if state.running then
+      runFarmLoop()
+      runChestLoop()
+      runXmasLoop()
+      runSkillLoop()
+      runDungeonLoop()
+      runMugenLoop()
+    end
+  end
+
+  function callbacks.onUiReady(info)
+    uiInfo = info
+    if CONFIG.features.autoFarm or CONFIG.features.autoBoss then
+      startRuntime()
+    else
+      setStatus("STOPPED")
+    end
+  end
+
+  UI.init(CONFIG, state, callbacks)
+
+  Utils.bindMasterToggle(function()
+    if state.running then
+      stopRuntime()
+    else
+      startRuntime()
+    end
+  end)
+
+  if stats.enabled then
+    task.spawn(function()
+      while true do
+        updateStatsLabel()
+        task.wait(1)
+      end
+    end)
+  end
+
+  print("[ToRungHub] Hub initialized. Press " .. tostring(CONFIG.hotkeys.masterToggle) .. " to toggle.")
 end
