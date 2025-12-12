@@ -1,3 +1,4 @@
+--// File: ReplicatedStorage/ToRungHub/Shared/Logger.lua
 --!strict
 local Logger = {}
 Logger.__index = Logger

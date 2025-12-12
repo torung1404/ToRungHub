@@ -1,3 +1,4 @@
+--// File: ReplicatedStorage/ToRungHub/Shared/Util.lua
 --!strict
 local Players = game:GetService("Players")
 
@@ -58,7 +59,6 @@ end
 
 function Util.lookAtDown(fromPos: Vector3, targetPos: Vector3): CFrame
 	local cf = CFrame.lookAt(fromPos, targetPos)
-	-- ensure "down-ish" orientation by looking at target from above
 	return cf
 end
 

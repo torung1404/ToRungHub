@@ -1,3 +1,4 @@
+--// File: ReplicatedStorage/ToRungHub/Shared/Net.lua
 --!strict
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -7,9 +8,9 @@ Net.FolderName = "ToRungHub"
 Net.RemotesFolderName = "Remotes"
 
 Net.RemoteNames = {
-	ClientCommand = "ClientCommand",   -- RemoteEvent: client -> server (toggle/options/actions)
-	StateUpdate = "StateUpdate",       -- RemoteEvent: server -> client (state snapshot)
-	QuerySnapshot = "QuerySnapshot",   -- RemoteFunction: client -> server (pull snapshot)
+	ClientCommand = "ClientCommand",
+	StateUpdate = "StateUpdate",
+	QuerySnapshot = "QuerySnapshot",
 }
 
 export type ClientCommandPayload = {
