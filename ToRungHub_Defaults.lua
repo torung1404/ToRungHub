@@ -30,3 +30,5 @@ local Defaults = {
 	-- Fruit rotation (example)
 	Fruits = { "FruitA", "FruitB", "FruitC" },
 }
+
+return Defaults
