@@ -1,1012 +1,1062 @@
--- file: StarterPlayerScripts/AutoFarm_UI.lua
--- ToRungHub: TeleportData-based config persistence (hop server giữ config cũ)
+--// =========================================================
+--// FILE: AutoFarm_UI.lua   (LEGIT TEMPLATE: ToRungHub UI + hop persistence)
+--// Purpose: Client UI framework + continuous config save + hop server keep config.
+--// Notes:
+--//  - Persists across server-hop/teleport (TeleportData)
+--//  - Persists within same session (PlayerGui Attribute)
+--//  - Does NOT persist after leaving the game (true out/in) without DataStore/backend
+--// =========================================================
 
-local Players = game:GetService('Players')
-local RunService = game:GetService('RunService')
-local CollectionService = game:GetService('CollectionService')
-local Workspace = game:GetService('Workspace')
-local UIS = game:GetService('UserInputService')
-local ReplicatedStorage = game:GetService('ReplicatedStorage')
-local TeleportService = game:GetService('TeleportService')
-local HttpService = game:GetService('HttpService')
+--!strict
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
+local RunService = game:GetService("RunService")
 
-local plr = Players.LocalPlayer
-
-local function now()
-  return os.clock()
-end
+local LOCAL_PLAYER = Players.LocalPlayer
 
 -- =========================
--- Anti-freeze logging (THROTTLED)
+-- Config (edit keys freely)
 -- =========================
-local _logThrottle = {} -- [key] = { t=number, suppressed=int }
+local CONFIG_KEY = "ToRungHubCfgV1"
+local SESSION_ATTR = "ToRungHubCfgJson"
 
-local function warnThrottled(key, msg, intervalSec)
-  local t = os.clock()
-  local e = _logThrottle[key]
-  if not e then
-    _logThrottle[key] = { t = t, suppressed = 0 }
-    warn(msg)
-    return
-  end
-  if (t - e.t) >= intervalSec then
-    local extra = ''
-    if e.suppressed > 0 then
-      extra = (' (suppressed %d logs)'):format(e.suppressed)
-    end
-    e.t = t
-    e.suppressed = 0
-    warn(msg .. extra)
-  else
-    e.suppressed += 1
-  end
-end
-
-local CFG = {
-  -- Core
-  Enabled = false,
-  BossOnly = false,
-  SmoothMove = true,
-
-  -- Performance / debug
-  DebugLog = false,              -- set true only when debugging
-  WarnThrottleSeconds = 6,       -- throttle warn spam
-  MonsterCacheSeconds = 0.30,    -- cache mob list
-  MonsterFolderRefreshSeconds = 2.0,
-  HpCacheSeconds = 0.15,         -- cache HP percent
-  UiStatusHz = 10,               -- status label update rate
-  SliderHz = 10,                 -- slider sampling rate
-
-  -- Targeting / movement
-  Radius = 3000,
-  FollowDist = 6,
-  HeightOffset = 0,
-  Alpha = 0.35,
-
-  -- Scan / timing
-  RetargetTick = 0.12,
-  BlacklistSeconds = 6,
-  TargetMaxLockSeconds = 25,
-
-  -- NPC folders / tags
-  MonsterFolderNames = { 'Monsters', 'NPC' },
-  MonsterTag = nil,
-  BossTag = 'Boss',
-
-  -- NPC dead detection
-  HPAttrName = 'HP',
-  StateAttrName = 'State',
-  DeadStates = { 'death', 'dead', 'died', 'ko', 'down' },
-
-  -- Features
-  AutoAttack = false,
-  AutoHakiV = false,
-  AutoSwitchFruitR = false,
-  AutoMeditate = false,
-
-  -- Aggro sweep (TP qua các cụm quái để kéo aggro trước khi đánh)
-  AggroSweep = true,
-  AggroRange = 75,
-  SweepGridSize = 140,
-  SweepMaxPoints = 8,
-  SweepDwell = 0.12,
-  SweepHeight = 3,
-  SweepInterval = 12,
-
-  -- Cooldowns (user adjustable)
-  AttackCD = 0.15,
-  HakiCD = 6,
-  SwitchFruitCD = 12,
-
-  -- Attack options
-  AttackMode = 'TOOL', -- TOOL | REMOTE | UI
-  AttackRange = 35,
-  EquipToolIfNone = true,
-  AttackRemoteName = nil,
-  AttackRemotePath = nil, -- e.g. { 'Remotes', 'Combat', 'TryAttack' }
-  AttackRemoteArgsMode = 'TARGET_ONLY', -- TARGET_ONLY | NONE
-
-  -- Heal thresholds (%)
-  HealMinPercent = 25,
-  HealMaxPercent = 90,
-
-  -- Safe spot
-  SafeCFrame = nil,
-  SafeFallbackHeight = 120,
-
-  -- UI lookup names
-  UiName_Haki = 'Haki',
-  UiName_SwitchFruit = 'SwitchFruit',
-  UiName_Attack = 'Attack',
-  UiName_Meditate = 'Meditate',
-
-  -- Player HP UI (Dex screenshot: HPBar > CharInfo > Background > HP)
-  HpUiRootNames = { 'HPBar', 'HpBar', 'HPBAR' },
-  HpUiFillPathCandidates = {
-    { 'CharInfo', 'Background', 'HP' },
-    { 'CharInfo', 'Background', 'HPFill' },
-    { 'CharInfo', 'Background', 'Health' },
-    { 'Background', 'HP' },
-  },
-  HpUiPreferText = true,
-
-  -- Persistence
-  -- TeleportData + session attribute keeps settings when hopping servers.
-  -- (Does not persist after leaving the game without DataStore/backend.)
-  TeleportKey = 'ToRungHubCfgV2',
-  SessionAttrName = 'ToRungHubCfgJson',
-
-  -- Legacy (DataStore) remotes (unused when using TeleportData-only)
-  ConfigRFName = 'AutoFarmConfigRF',
-  ConfigREName = 'AutoFarmConfigRE',
+local DEFAULT_CONFIG = {
+	v = 1,
+	ui = {
+		visible = true,
+		minimized = false,
+		locked = false,
+		tab = "Home",
+		pos = { xScale = 0, xOffset = 18, yScale = 0.35, yOffset = 0 },
+		opacity = 0.16, -- 0..0.6
+	},
+	toggles = {
+		Enabled = false, -- "start"
+		OptionA = false,
+		OptionB = true,
+		OptionC = false,
+	},
+	sliders = {
+		Radius = 3000,
+		Speed = 50,
+	},
 }
 
-local function safeCall(label, fn, ...)
-  local ok, res = pcall(fn, ...)
-  if not ok and CFG.DebugLog then
-    warnThrottled(
-      tostring(label),
-      '[AutoFarmUI] ' .. tostring(label) .. ' failed: ' .. tostring(res),
-      CFG.WarnThrottleSeconds or 6
-    )
-  end
-  return ok, res
+local MAX_DEPTH = 4
+local MAX_KEYS = 256
+
+local function deepCopy(v: any, depth: number?): any
+	depth = depth or 0
+	if depth > MAX_DEPTH then
+		return nil
+	end
+	if typeof(v) ~= "table" then
+		return v
+	end
+	local out = {}
+	local n = 0
+	for k, vv in pairs(v) do
+		n += 1
+		if n > MAX_KEYS then
+			break
+		end
+		out[deepCopy(k, depth + 1)] = deepCopy(vv, depth + 1)
+	end
+	return out
+end
+
+local function sanitize(v: any, depth: number?): any
+	depth = depth or 0
+	if depth > MAX_DEPTH then
+		return nil
+	end
+	local t = typeof(v)
+	if t == "boolean" or t == "number" or t == "string" then
+		return v
+	end
+	if t ~= "table" then
+		return nil
+	end
+	local out = {}
+	local n = 0
+	for k, vv in pairs(v) do
+		n += 1
+		if n > MAX_KEYS then
+			break
+		end
+		local kt = typeof(k)
+		if kt == "string" or kt == "number" then
+			local sv = sanitize(vv, depth + 1)
+			if sv ~= nil then
+				out[k] = sv
+			end
+		end
+	end
+	return out
+end
+
+local function getPlayerGui(): PlayerGui?
+	return LOCAL_PLAYER:FindFirstChildOfClass("PlayerGui")
+end
+
+local function safeJsonEncode(t: any): (boolean, string)
+	local ok, res = pcall(function()
+		return HttpService:JSONEncode(t)
+	end)
+	return ok, ok and res or ""
+end
+
+local function safeJsonDecode(s: string): (boolean, any)
+	local ok, res = pcall(function()
+		return HttpService:JSONDecode(s)
+	end)
+	return ok, res
 end
 
 -- =========================
--- Character helpers
+-- Config Manager (client-only)
 -- =========================
-local function char()
-  return plr.Character
+local Config = {}
+Config.__index = Config
+
+function Config.new(defaultCfg: table)
+	local self = setmetatable({}, Config)
+	self._cfg = sanitize(defaultCfg, 0) or {}
+	self._saveToken = 0
+	self._lastSavedJson = ""
+	return self
 end
 
-local function hrp()
-  local c = char()
-  return c and c:FindFirstChild('HumanoidRootPart')
+function Config:Get(): table
+	return deepCopy(self._cfg, 0) or {}
 end
 
-local function getHum(m)
-  return m and m:FindFirstChildOfClass('Humanoid')
+function Config:Set(newCfg: table)
+	self._cfg = sanitize(newCfg, 0) or {}
 end
 
-local function getRoot(m)
-  if not m then return nil end
-  return m:FindFirstChild('HumanoidRootPart') or m.PrimaryPart
+function Config:_saveToSessionAttr(payload: table)
+	local pg = getPlayerGui()
+	if not pg then
+		return
+	end
+	local ok, json = safeJsonEncode(payload)
+	if not ok then
+		return
+	end
+	if json == self._lastSavedJson then
+		return
+	end
+	self._lastSavedJson = json
+	pg:SetAttribute(SESSION_ATTR, json)
 end
 
-local function normalizeString(v)
-  if typeof(v) ~= 'string' then return '' end
-  return string.lower(v)
+function Config:SaveDebounced(onStatus: ((string) -> ())?)
+	self._saveToken += 1
+	local token = self._saveToken
+	if onStatus then
+		onStatus("Saving…")
+	end
+
+	task.delay(0.2, function()
+		if token ~= self._saveToken then
+			return
+		end
+		self:_saveToSessionAttr(self._cfg)
+		if onStatus then
+			onStatus("Saved")
+			task.delay(1.0, function()
+				onStatus("")
+			end)
+		end
+	end)
 end
 
-local function stateIsDead(m)
-  local st = m:GetAttribute(CFG.StateAttrName)
-  local s = normalizeString(st)
-  if s == '' then return false end
-  for _, deadKey in ipairs(CFG.DeadStates) do
-    if s == deadKey then
-      return true
-    end
-  end
-  return false
+function Config:LoadInitial()
+	-- 1) TeleportData (hop server / teleport)
+	do
+		local ok, joinData = pcall(function()
+			return LOCAL_PLAYER:GetJoinData()
+		end)
+		if ok and typeof(joinData) == "table" and typeof(joinData.TeleportData) == "table" then
+			local td = joinData.TeleportData
+			local payload = td[CONFIG_KEY]
+			if typeof(payload) == "table" then
+				local s = sanitize(payload, 0)
+				if s then
+					self._cfg = s
+					self:_saveToSessionAttr(self._cfg)
+					return
+				end
+			end
+		end
+	end
+
+	-- 2) Session attribute (same session survive UI reload/respawn)
+	do
+		local pg = getPlayerGui()
+		if pg then
+			local json = pg:GetAttribute(SESSION_ATTR)
+			if typeof(json) == "string" and #json > 0 then
+				local ok, decoded = safeJsonDecode(json)
+				if ok and typeof(decoded) == "table" then
+					local s = sanitize(decoded, 0)
+					if s then
+						self._cfg = s
+						return
+					end
+				end
+			end
+		end
+	end
+
+	-- 3) Default
+	self._cfg = sanitize(DEFAULT_CONFIG, 0) or {}
+	self:_saveToSessionAttr(self._cfg)
 end
 
-local function getNPC_HP(m)
-  local hp = m:GetAttribute(CFG.HPAttrName)
-  if typeof(hp) == 'number' then
-    return hp
-  end
-  local hpObj = m:FindFirstChild(CFG.HPAttrName)
-  if hpObj and hpObj:IsA('ValueBase') and typeof(hpObj.Value) == 'number' then
-    return hpObj.Value
-  end
-  local h = getHum(m)
-  if h then
-    return h.Health
-  end
-  return nil
+function Config:GetTeleportData(): table
+	return {
+		[CONFIG_KEY] = self:Get(),
+	}
 end
 
-local function deadLike(m)
-  if not (m and m:IsA('Model')) then return true end
-  if not m:IsDescendantOf(Workspace) then return true end
-
-  local hp = getNPC_HP(m)
-  if typeof(hp) == 'number' and hp <= 0 then return true end
-  if stateIsDead(m) then return true end
-
-  local h = getHum(m)
-  if not h then return true end
-  if h.Health <= 0 then return true end
-  if h:GetState() == Enum.HumanoidStateType.Dead then return true end
-  return false
+function Config:Teleport(placeId: number, jobId: string?)
+	local td = self:GetTeleportData()
+	if typeof(jobId) == "string" and #jobId > 0 then
+		TeleportService:TeleportToPlaceInstance(placeId, jobId, LOCAL_PLAYER, td)
+	else
+		TeleportService:Teleport(placeId, LOCAL_PLAYER, td)
+	end
 end
 
-local function alive(m)
-  local r = getRoot(m)
-  if not r then return false end
-  return not deadLike(m)
-end
-
-local function isBoss(m)
-  if not (m and m:IsA('Model')) then return false end
-  if CFG.BossTag and CollectionService:HasTag(m, CFG.BossTag) then
-    return true
-  end
-  local n = (m.Name or ''):lower()
-  return n:find('boss') ~= nil
-end
+local cfg = Config.new(DEFAULT_CONFIG)
+cfg:LoadInitial()
 
 -- =========================
--- Monster listing (CACHED + avoid heavy fallback)
+-- UI Helpers
 -- =========================
-local monsterFolderCache = { t = 0, inst = nil }
-local monsterListCache = { t = 0, list = {} }
-local workspaceFallbackCache = { t = 0, list = {} }
-
-local function resolveMonsterFolder()
-  local t = now()
-  if monsterFolderCache.inst and monsterFolderCache.inst.Parent and (t - monsterFolderCache.t) < (CFG.MonsterFolderRefreshSeconds or 2) then
-    return monsterFolderCache.inst
-  end
-  monsterFolderCache.t = t
-  monsterFolderCache.inst = nil
-
-  for _, name in ipairs(CFG.MonsterFolderNames) do
-    local f = Workspace:FindFirstChild(name)
-    if f then
-      monsterFolderCache.inst = f
-      return f
-    end
-  end
-  return nil
+local function udim2FromTbl(t: any): UDim2?
+	if typeof(t) ~= "table" then
+		return nil
+	end
+	local xs = tonumber(t.xScale)
+	local xo = tonumber(t.xOffset)
+	local ys = tonumber(t.yScale)
+	local yo = tonumber(t.yOffset)
+	if not (xs and xo and ys and yo) then
+		return nil
+	end
+	return UDim2.new(xs, xo, ys, yo)
 end
 
-local function listMonsters()
-  local t = now()
-  if monsterListCache.list and (t - monsterListCache.t) < (CFG.MonsterCacheSeconds or 0.30) then
-    return monsterListCache.list
-  end
-  monsterListCache.t = t
+local function tblFromUdim2(u: UDim2): table
+	return {
+		xScale = u.X.Scale,
+		xOffset = u.X.Offset,
+		yScale = u.Y.Scale,
+		yOffset = u.Y.Offset,
+	}
+end
 
-  local out = {}
+local function clamp(n: number, a: number, b: number): number
+	return math.max(a, math.min(b, n))
+end
 
-  if CFG.MonsterTag then
-    local tagged = CollectionService:GetTagged(CFG.MonsterTag)
-    if tagged and #tagged > 0 then
-      for _, inst in ipairs(tagged) do
-        if inst and inst:IsA('Model') then
-          table.insert(out, inst)
-        end
-      end
-      monsterListCache.list = out
-      return out
-    end
-  end
-
-  local folder = resolveMonsterFolder()
-  if folder then
-    local kids = folder:GetChildren()
-    for i = 1, #kids do
-      local m = kids[i]
-      if m and m:IsA('Model') then
-        out[#out + 1] = m
-      end
-    end
-    monsterListCache.list = out
-    return out
-  end
-
-  if (t - workspaceFallbackCache.t) > 6 then
-    workspaceFallbackCache.t = t
-    local kids = Workspace:GetChildren()
-    local tmp = {}
-    for i = 1, #kids do
-      local m = kids[i]
-      if m and m:IsA('Model') then
-        tmp[#tmp + 1] = m
-      end
-    end
-    workspaceFallbackCache.list = tmp
-    if CFG.DebugLog then
-      warnThrottled(
-        'WorkspaceFallback',
-        '[AutoFarmUI] Monster folder/tag not found -> using slow Workspace scan (cached). Fix CFG.MonsterFolderNames/MonsterTag.',
-        10
-      )
-    end
-  end
-
-  monsterListCache.list = workspaceFallbackCache.list or {}
-  return monsterListCache.list
+local function themeOpacity(): number
+	local c = cfg:Get()
+	local op = tonumber(((c.ui or {}).opacity)) or DEFAULT_CONFIG.ui.opacity
+	return clamp(op, 0, 0.6)
 end
 
 -- =========================
--- Blacklist (anti stuck on corpse)
+-- Build UI (ToRungHub style)
 -- =========================
-local blacklist = {} -- [Instance] = expireTime
+local playerGui = getPlayerGui() or LOCAL_PLAYER:WaitForChild("PlayerGui")
 
-local function isBlacklisted(m)
-  local exp = blacklist[m]
-  if not exp then return false end
-  if now() >= exp then
-    blacklist[m] = nil
-    return false
-  end
-  return true
+-- ensure only 1 instance
+local old = playerGui:FindFirstChild("ToRungHub")
+if old then
+	old:Destroy()
 end
 
-local function addBlacklist(m)
-  blacklist[m] = now() + CFG.BlacklistSeconds
-end
-
--- =========================
--- Target selection (FAST: distance^2, no sqrt)
--- =========================
-local function bestTarget(myHrp)
-  local best = nil
-  local bestScore = -math.huge
-  local myPos = myHrp.Position
-  local r2 = CFG.Radius * CFG.Radius
-
-  local mobs = listMonsters()
-  for i = 1, #mobs do
-    local m = mobs[i]
-    if m and m:IsA('Model') and (not isBlacklisted(m)) and alive(m) then
-      local boss = isBoss(m)
-      if (not CFG.BossOnly) or boss then
-        local r = getRoot(m)
-        if r then
-          local dp = myPos - r.Position
-          local d2 = dp:Dot(dp)
-          if d2 <= r2 then
-            local hp = getNPC_HP(m)
-            if not (typeof(hp) == 'number' and hp <= 0) then
-              local hpScore = (typeof(hp) == 'number') and hp or 0
-              local score = (boss and 1e9 or 0) + (hpScore * 0.001) - (d2 * 0.0005)
-              if score > bestScore then
-                bestScore = score
-                best = m
-              end
-            end
-          end
-        end
-      end
-    end
-  end
-
-  return best
-end
-
--- =========================
--- Movement
--- =========================
-local function moveBehind(myHrp, target, dt)
-  local r = getRoot(target)
-  if not r then return end
-
-  local goalPos = (r.CFrame * CFrame.new(0, CFG.HeightOffset, CFG.FollowDist)).Position
-  goalPos = Vector3.new(goalPos.X, r.Position.Y + CFG.HeightOffset, goalPos.Z)
-
-  if CFG.SmoothMove then
-    local t = math.clamp(CFG.Alpha * (dt * 60), 0, 1)
-    local newPos = myHrp.Position:Lerp(goalPos, t)
-    myHrp.CFrame = CFrame.lookAt(newPos, r.Position)
-  else
-    myHrp.CFrame = CFrame.lookAt(goalPos, r.Position)
-  end
-end
-
--- =========================
--- UI cache helpers
--- =========================
-local function getPlayerGui()
-  return plr:FindFirstChildOfClass('PlayerGui')
-end
-
-local uiCache = {}
-local btnCache = {}
-local lastLookup = {}
-
-local function findFirstDescendantByName(root, name)
-  if not root then return nil end
-  if root.Name == name then return root end
-  for _, d in ipairs(root:GetDescendants()) do
-    if d.Name == name then return d end
-  end
-  return nil
-end
-
-local function findClickable(inst)
-  if not inst then return nil end
-  if inst:IsA('GuiButton') then return inst end
-  for _, d in ipairs(inst:GetDescendants()) do
-    if d:IsA('GuiButton') then return d end
-  end
-  return nil
-end
-
-local function getUiInstance(name)
-  local pg = getPlayerGui()
-  if not pg then return nil end
-
-  local cached = uiCache[name]
-  if cached and cached:IsDescendantOf(pg) then
-    return cached
-  end
-
-  local t = now()
-  if lastLookup[name] and (t - lastLookup[name]) < 0.75 then
-    return nil
-  end
-  lastLookup[name] = t
-
-  local inst = findFirstDescendantByName(pg, name)
-  if inst then
-    uiCache[name] = inst
-    btnCache[name] = nil
-  end
-  return inst
-end
-
-local function tryActivateByName(name)
-  local inst = getUiInstance(name)
-  if not inst then return false end
-
-  local btn = btnCache[name]
-  if not (btn and btn:IsDescendantOf(inst)) then
-    btn = findClickable(inst)
-    btnCache[name] = btn
-  end
-  if not btn then return false end
-
-  local ok = false
-  safeCall('Activate ' .. name, function()
-    btn:Activate()
-    ok = true
-  end)
-  return ok
-end
-
-local function isUiStateActive(name)
-  local inst = getUiInstance(name)
-  if not inst then return nil end
-  local st = inst:GetAttribute('State')
-  if typeof(st) ~= 'string' then return nil end
-  local s = string.lower(st)
-  if s == 'idle' or s == 'off' or s == 'false' then
-    return false
-  end
-  return true
-end
-
-local vim
-safeCall('Get VirtualInputManager', function()
-  vim = game:GetService('VirtualInputManager')
-end)
-
-local function pressKey(keyCode)
-  if not vim then return false end
-  local ok = false
-  safeCall('PressKey ' .. tostring(keyCode), function()
-    vim:SendKeyEvent(true, keyCode, false, game)
-    vim:SendKeyEvent(false, keyCode, false, game)
-    ok = true
-  end)
-  return ok
-end
-
--- =========================
--- Persistence (TeleportData + session attribute)
---   - Keeps config when hopping/teleporting to another server.
---   - Keeps config during the same session (UI reload / respawn).
---   - Does NOT persist after leaving the game (out/in) without DataStore/backend.
--- =========================
-local persistenceReady = true
-local _saveToken = 0
-local _lastPayload = nil
-
-local function sanitizeTeleportValue(v, depth)
-  depth = depth or 0
-  if depth > 4 then return nil end
-  local t = typeof(v)
-  if t == 'string' or t == 'number' or t == 'boolean' then
-    return v
-  end
-  if t ~= 'table' then
-    return nil
-  end
-  local out = {}
-  local n = 0
-  for k, vv in pairs(v) do
-    n += 1
-    if n > 256 then break end
-    if typeof(k) == 'string' or typeof(k) == 'number' then
-      local sv = sanitizeTeleportValue(vv, depth + 1)
-      if sv ~= nil then
-        out[k] = sv
-      end
-    end
-  end
-  return out
-end
-
-local function playerGui()
-  return plr:FindFirstChildOfClass('PlayerGui')
-end
-
-local function loadTeleportPayload()
-  local ok, joinData = pcall(function()
-    return plr:GetJoinData()
-  end)
-  if not ok or type(joinData) ~= 'table' then
-    return nil
-  end
-  local td = joinData.TeleportData
-  if type(td) ~= 'table' then
-    return nil
-  end
-  local payload = td[CFG.TeleportKey]
-  if type(payload) ~= 'table' then
-    return nil
-  end
-  return sanitizeTeleportValue(payload, 0)
-end
-
-local function loadSessionPayload()
-  local pg = playerGui()
-  if not pg then return nil end
-  local json = pg:GetAttribute(CFG.SessionAttrName)
-  if typeof(json) ~= 'string' or #json == 0 then
-    return nil
-  end
-  local ok, decoded = pcall(function()
-    return HttpService:JSONDecode(json)
-  end)
-  if not ok or type(decoded) ~= 'table' then
-    return nil
-  end
-  return sanitizeTeleportValue(decoded, 0)
-end
-
-local function persistSessionPayload(payload)
-  local pg = playerGui()
-  if not pg then return end
-  local ok, json = pcall(function()
-    return HttpService:JSONEncode(payload)
-  end)
-  if ok then
-    pg:SetAttribute(CFG.SessionAttrName, json)
-  end
-end
-
-local function packTeleportData(payload)
-  return { [CFG.TeleportKey] = payload }
-end
-
-local function teleportWithPayload(placeId, jobIdOptional, payload)
-  local td = packTeleportData(payload)
-  if typeof(jobIdOptional) == 'string' and #jobIdOptional > 0 then
-    TeleportService:TeleportToPlaceInstance(placeId, jobIdOptional, plr, td)
-  else
-    TeleportService:Teleport(placeId, plr, td)
-  end
-end
-
-local function u2ToTbl(u2)
-  if typeof(u2) ~= 'UDim2' then return nil end
-  return {
-    xScale = u2.X.Scale, xOffset = u2.X.Offset,
-    yScale = u2.Y.Scale, yOffset = u2.Y.Offset,
-  }
-end
-
-local function tblToU2(t)
-  if type(t) ~= 'table' then return nil end
-  local xs, xo = tonumber(t.xScale), tonumber(t.xOffset)
-  local ys, yo = tonumber(t.yScale), tonumber(t.yOffset)
-  if not (xs and xo and ys and yo) then return nil end
-  return UDim2.new(xs, xo, ys, yo)
-end
-
-local function cfToTbl(cf)
-  if typeof(cf) ~= 'CFrame' then return nil end
-  local p = cf.Position
-  if not (p and p.Magnitude < 1e7) then return nil end
-  return { x = p.X, y = p.Y, z = p.Z }
-end
-
-local function tblToCf(t)
-  if type(t) ~= 'table' then return nil end
-  local x, y, z = tonumber(t.x), tonumber(t.y), tonumber(t.z)
-  if not (x and y and z) then return nil end
-  return CFrame.new(x, y, z)
-end
-
-local DEFAULTS = {}
-for k, v in pairs(CFG) do
-  DEFAULTS[k] = v
-end
-
-local function serializeConfig(framePos, frameVisible, minimized, dragLocked)
-  local cfg = {
-    Enabled = CFG.Enabled,
-    BossOnly = CFG.BossOnly,
-    SmoothMove = CFG.SmoothMove,
-
-    DebugLog = CFG.DebugLog,
-
-    Radius = CFG.Radius,
-    FollowDist = CFG.FollowDist,
-    HeightOffset = CFG.HeightOffset,
-    Alpha = CFG.Alpha,
-
-    RetargetTick = CFG.RetargetTick,
-
-    AutoAttack = CFG.AutoAttack,
-    AutoHakiV = CFG.AutoHakiV,
-    AutoSwitchFruitR = CFG.AutoSwitchFruitR,
-    AutoMeditate = CFG.AutoMeditate,
-
-    AggroSweep = CFG.AggroSweep,
-
-    AttackCD = CFG.AttackCD,
-
-    HealMinPercent = CFG.HealMinPercent,
-    HealMaxPercent = CFG.HealMaxPercent,
-
-    SafeCFrame = cfToTbl(CFG.SafeCFrame),
-  }
-
-  local ui = {
-    pos = u2ToTbl(framePos),
-    visible = frameVisible and true or false,
-    minimized = minimized and true or false,
-    dragLocked = dragLocked and true or false,
-  }
-
-  return {
-    v = 2,
-    cfg = cfg,
-    ui = ui,
-  }
-end
-
-local function applyLoaded(data)
-  if type(data) ~= 'table' then return nil end
-  if type(data.cfg) ~= 'table' then return nil end
-
-  local cfg = data.cfg
-  local ui = (type(data.ui) == 'table') and data.ui or {}
-
-  local function clampNum(v, minV, maxV, fallback)
-    if typeof(v) ~= 'number' then return fallback end
-    if minV and v < minV then return minV end
-    if maxV and v > maxV then return maxV end
-    return v
-  end
-
-  CFG.Enabled = (cfg.Enabled == true)
-  CFG.BossOnly = (cfg.BossOnly == true)
-  CFG.SmoothMove = (cfg.SmoothMove ~= false)
-
-  CFG.Radius = clampNum(cfg.Radius, 100, 50000, DEFAULTS.Radius)
-  CFG.FollowDist = clampNum(cfg.FollowDist, 1, 40, DEFAULTS.FollowDist)
-  CFG.HeightOffset = clampNum(cfg.HeightOffset, -50, 50, DEFAULTS.HeightOffset)
-  CFG.Alpha = clampNum(cfg.Alpha, 0.05, 1, DEFAULTS.Alpha)
-
-  CFG.AutoAttack = (cfg.AutoAttack == true)
-  CFG.AutoHakiV = (cfg.AutoHakiV == true)
-  CFG.AutoSwitchFruitR = (cfg.AutoSwitchFruitR == true)
-  CFG.AutoMeditate = (cfg.AutoMeditate == true)
-
-  CFG.AggroSweep = (cfg.AggroSweep ~= false)
-
-  CFG.AttackCD = clampNum(cfg.AttackCD, 0.03, 1.0, DEFAULTS.AttackCD)
-
-  CFG.HealMinPercent = clampNum(cfg.HealMinPercent, 0, 100, DEFAULTS.HealMinPercent)
-  CFG.HealMaxPercent = clampNum(cfg.HealMaxPercent, 0, 100, DEFAULTS.HealMaxPercent)
-
-  if type(cfg.SafeCFrame) == 'table' then
-    local cf = tblToCf(cfg.SafeCFrame)
-    if cf then CFG.SafeCFrame = cf end
-  end
-
-  return ui
-end
-
-local function scheduleSave(getUiStateFn, setSaveTextFn)
-  if not persistenceReady then return end
-  _saveToken += 1
-  local token = _saveToken
-  if setSaveTextFn then setSaveTextFn('Saving...') end
-
-  task.delay(0.20, function()
-    if token ~= _saveToken then return end
-
-    local pos, vis, minimized, locked = getUiStateFn()
-    local payload = serializeConfig(pos, vis, minimized, locked)
-    payload = sanitizeTeleportValue(payload, 0) or payload
-
-    _lastPayload = payload
-    persistSessionPayload(payload)
-
-    if setSaveTextFn then setSaveTextFn('Saved') end
-  end)
-end
-
--- =========================
--- UI
--- =========================
-local gui = Instance.new('ScreenGui')
-gui.Name = 'ToRungHub'
+local gui = Instance.new("ScreenGui")
+gui.Name = "ToRungHub"
 gui.ResetOnSpawn = false
-gui.Parent = getPlayerGui() or plr:WaitForChild('PlayerGui')
+gui.IgnoreGuiInset = true
+gui.Parent = playerGui
 
-local frame = Instance.new('Frame')
-frame.Parent = gui
-frame.Size = UDim2.fromOffset(390, 360)
-frame.Position = UDim2.new(0, 25, 0, 160)
-frame.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
-frame.BorderSizePixel = 0
-frame.Active = true
+local main = Instance.new("Frame")
+main.Name = "Main"
+main.Parent = gui
+main.Size = UDim2.fromOffset(460, 320)
+main.Position = udim2FromTbl((cfg:Get().ui or {}).pos) or UDim2.new(0, 18, 0.35, 0)
+main.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+main.BackgroundTransparency = themeOpacity()
+main.BorderSizePixel = 0
+main.Active = true
 
-local corner = Instance.new('UICorner')
-corner.CornerRadius = UDim.new(0, 10)
-corner.Parent = frame
+local mainCorner = Instance.new("UICorner")
+mainCorner.CornerRadius = UDim.new(0, 12)
+mainCorner.Parent = main
 
-local header = Instance.new('Frame')
-header.Parent = frame
-header.Size = UDim2.new(1, 0, 0, 32)
-header.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
-header.BorderSizePixel = 0
+local stroke = Instance.new("UIStroke")
+stroke.Parent = main
+stroke.Thickness = 1
+stroke.Color = Color3.fromRGB(255, 255, 255)
+stroke.Transparency = 0.82
 
-local headerCorner = Instance.new('UICorner')
-headerCorner.CornerRadius = UDim.new(0, 10)
-headerCorner.Parent = header
+local shadow = Instance.new("Frame")
+shadow.Name = "Shadow"
+shadow.Parent = gui
+shadow.Size = main.Size
+shadow.Position = main.Position + UDim2.fromOffset(6, 6)
+shadow.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+shadow.BackgroundTransparency = 0.65
+shadow.BorderSizePixel = 0
+shadow.ZIndex = main.ZIndex - 1
 
-local title = Instance.new('TextLabel')
-title.Parent = header
-title.Size = UDim2.new(1, -160, 1, 0)
-title.Position = UDim2.fromOffset(10, 0)
+local shadowCorner = Instance.new("UICorner")
+shadowCorner.CornerRadius = UDim.new(0, 14)
+shadowCorner.Parent = shadow
+
+local top = Instance.new("Frame")
+top.Name = "Topbar"
+top.Parent = main
+top.Size = UDim2.new(1, 0, 0, 34)
+top.BackgroundColor3 = Color3.fromRGB(22, 22, 22)
+top.BackgroundTransparency = themeOpacity()
+top.BorderSizePixel = 0
+
+local topCorner = Instance.new("UICorner")
+topCorner.CornerRadius = UDim.new(0, 12)
+topCorner.Parent = top
+
+local title = Instance.new("TextLabel")
+title.Parent = top
 title.BackgroundTransparency = 1
-title.TextXAlignment = Enum.TextXAlignment.Left
-title.Text = 'ToRungHub'
-title.TextColor3 = Color3.fromRGB(230, 230, 230)
+title.Position = UDim2.fromOffset(12, 0)
+title.Size = UDim2.new(1, -160, 1, 0)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 14
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.TextColor3 = Color3.fromRGB(240, 240, 240)
+title.Text = "ToRungHub"
 
-local saveLbl = Instance.new('TextLabel')
-saveLbl.Parent = header
-saveLbl.Size = UDim2.fromOffset(70, 32)
-saveLbl.Position = UDim2.new(1, -230, 0, 0)
+local saveLbl = Instance.new("TextLabel")
+saveLbl.Parent = top
 saveLbl.BackgroundTransparency = 1
-saveLbl.TextXAlignment = Enum.TextXAlignment.Right
-saveLbl.Text = ''
-saveLbl.TextColor3 = Color3.fromRGB(180, 180, 180)
+saveLbl.Position = UDim2.new(1, -240, 0, 0)
+saveLbl.Size = UDim2.fromOffset(120, 34)
 saveLbl.Font = Enum.Font.Gotham
 saveLbl.TextSize = 12
+saveLbl.TextXAlignment = Enum.TextXAlignment.Right
+saveLbl.TextColor3 = Color3.fromRGB(175, 175, 175)
+saveLbl.Text = ""
 
-local closeBtn = Instance.new('TextButton')
-closeBtn.Parent = header
-closeBtn.Size = UDim2.fromOffset(32, 32)
-closeBtn.Position = UDim2.new(1, -32, 0, 0)
-closeBtn.BackgroundTransparency = 1
-closeBtn.Text = 'X'
-closeBtn.TextColor3 = Color3.fromRGB(230, 230, 230)
-closeBtn.Font = Enum.Font.GothamBold
-closeBtn.TextSize = 14
+local function setStatus(s: string)
+	saveLbl.Text = s
+end
 
-local miniBtn = Instance.new('TextButton')
-miniBtn.Parent = header
-miniBtn.Size = UDim2.fromOffset(32, 32)
-miniBtn.Position = UDim2.new(1, -64, 0, 0)
-miniBtn.BackgroundTransparency = 1
-miniBtn.Text = '-'
-miniBtn.TextColor3 = Color3.fromRGB(230, 230, 230)
-miniBtn.Font = Enum.Font.GothamBold
-miniBtn.TextSize = 16
+local function mkTopBtn(text: string, xRight: number): TextButton
+	local b = Instance.new("TextButton")
+	b.Parent = top
+	b.Size = UDim2.fromOffset(34, 34)
+	b.Position = UDim2.new(1, -xRight, 0, 0)
+	b.BackgroundTransparency = 1
+	b.Font = Enum.Font.GothamBold
+	b.TextSize = 14
+	b.TextColor3 = Color3.fromRGB(230, 230, 230)
+	b.Text = text
+	return b
+end
 
-local lockBtn = Instance.new('TextButton')
-lockBtn.Parent = header
-lockBtn.Size = UDim2.fromOffset(32, 32)
-lockBtn.Position = UDim2.new(1, -96, 0, 0)
-lockBtn.BackgroundTransparency = 1
-lockBtn.Text = '🔓'
-lockBtn.TextColor3 = Color3.fromRGB(230, 230, 230)
-lockBtn.Font = Enum.Font.Gotham
-lockBtn.TextSize = 14
+local btnClose = mkTopBtn("×", 34)
+local btnMin = mkTopBtn("–", 68)
+local btnLock = mkTopBtn("🔓", 102)
 
-local content = Instance.new('Frame')
-content.Parent = frame
-content.Position = UDim2.new(0, 0, 0, 32)
-content.Size = UDim2.new(1, 0, 1, -32)
+local body = Instance.new("Frame")
+body.Parent = main
+body.Position = UDim2.new(0, 0, 0, 34)
+body.Size = UDim2.new(1, 0, 1, -34)
+body.BackgroundTransparency = 1
+
+local sidebar = Instance.new("Frame")
+sidebar.Parent = body
+sidebar.Size = UDim2.fromOffset(140, 286)
+sidebar.Position = UDim2.fromOffset(0, 0)
+sidebar.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
+sidebar.BackgroundTransparency = themeOpacity()
+sidebar.BorderSizePixel = 0
+
+local sideStroke = Instance.new("UIStroke")
+sideStroke.Parent = sidebar
+sideStroke.Thickness = 1
+sideStroke.Color = Color3.fromRGB(255, 255, 255)
+sideStroke.Transparency = 0.9
+
+local sidePad = Instance.new("UIPadding")
+sidePad.Parent = sidebar
+sidePad.PaddingTop = UDim.new(0, 10)
+sidePad.PaddingLeft = UDim.new(0, 10)
+sidePad.PaddingRight = UDim.new(0, 10)
+
+local sideList = Instance.new("UIListLayout")
+sideList.Parent = sidebar
+sideList.Padding = UDim.new(0, 8)
+sideList.FillDirection = Enum.FillDirection.Vertical
+sideList.SortOrder = Enum.SortOrder.LayoutOrder
+
+local content = Instance.new("Frame")
+content.Parent = body
+content.Position = UDim2.fromOffset(140, 0)
+content.Size = UDim2.new(1, -140, 1, 0)
 content.BackgroundTransparency = 1
 
+local pages = Instance.new("Frame")
+pages.Parent = content
+pages.Size = UDim2.new(1, -12, 1, -12)
+pages.Position = UDim2.fromOffset(6, 6)
+pages.BackgroundTransparency = 1
+
+local function mkPage(name: string): ScrollingFrame
+	local p = Instance.new("ScrollingFrame")
+	p.Name = name
+	p.Parent = pages
+	p.Size = UDim2.new(1, 0, 1, 0)
+	p.BackgroundTransparency = 1
+	p.BorderSizePixel = 0
+	p.ScrollBarThickness = 4
+	p.Visible = false
+	p.CanvasSize = UDim2.new(0, 0, 0, 0)
+	p.AutomaticCanvasSize = Enum.AutomaticSize.Y
+
+	local layout = Instance.new("UIListLayout")
+	layout.Parent = p
+	layout.Padding = UDim.new(0, 10)
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+
+	local pad = Instance.new("UIPadding")
+	pad.Parent = p
+	pad.PaddingTop = UDim.new(0, 6)
+	pad.PaddingLeft = UDim.new(0, 6)
+	pad.PaddingRight = UDim.new(0, 6)
+	pad.PaddingBottom = UDim.new(0, 6)
+
+	return p
+end
+
+local pageHome = mkPage("Home")
+local pageSettings = mkPage("Settings")
+local pageTeleport = mkPage("Teleport")
+
+local function mkHeaderText(parent: Instance, text: string)
+	local t = Instance.new("TextLabel")
+	t.Parent = parent
+	t.BackgroundTransparency = 1
+	t.Size = UDim2.new(1, 0, 0, 18)
+	t.Font = Enum.Font.GothamBold
+	t.TextSize = 13
+	t.TextXAlignment = Enum.TextXAlignment.Left
+	t.TextColor3 = Color3.fromRGB(235, 235, 235)
+	t.Text = text
+	return t
+end
+
+local function mkNote(parent: Instance, text: string)
+	local t = Instance.new("TextLabel")
+	t.Parent = parent
+	t.BackgroundTransparency = 1
+	t.Size = UDim2.new(1, 0, 0, 32)
+	t.Font = Enum.Font.Gotham
+	t.TextSize = 12
+	t.TextWrapped = true
+	t.TextXAlignment = Enum.TextXAlignment.Left
+	t.TextColor3 = Color3.fromRGB(170, 170, 170)
+	t.Text = text
+	return t
+end
+
+local function mkRow(parent: Instance)
+	local row = Instance.new("Frame")
+	row.Parent = parent
+	row.Size = UDim2.new(1, 0, 0, 40)
+	row.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+	row.BackgroundTransparency = themeOpacity()
+	row.BorderSizePixel = 0
+
+	local cr = Instance.new("UICorner")
+	cr.CornerRadius = UDim.new(0, 10)
+	cr.Parent = row
+
+	local st = Instance.new("UIStroke")
+	st.Parent = row
+	st.Thickness = 1
+	st.Color = Color3.fromRGB(255, 255, 255)
+	st.Transparency = 0.92
+
+	return row
+end
+
+local function mkToggle(parent: Instance, label: string, getter: () -> boolean, setter: (boolean) -> ())
+	local row = mkRow(parent)
+
+	local txt = Instance.new("TextLabel")
+	txt.Parent = row
+	txt.BackgroundTransparency = 1
+	txt.Position = UDim2.fromOffset(12, 0)
+	txt.Size = UDim2.new(1, -90, 1, 0)
+	txt.Font = Enum.Font.Gotham
+	txt.TextSize = 12
+	txt.TextXAlignment = Enum.TextXAlignment.Left
+	txt.TextColor3 = Color3.fromRGB(225, 225, 225)
+	txt.Text = label
+
+	local btn = Instance.new("TextButton")
+	btn.Parent = row
+	btn.Size = UDim2.fromOffset(58, 24)
+	btn.Position = UDim2.new(1, -70, 0.5, -12)
+	btn.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+	btn.BackgroundTransparency = themeOpacity()
+	btn.BorderSizePixel = 0
+	btn.Font = Enum.Font.GothamBold
+	btn.TextSize = 12
+
+	local bcr = Instance.new("UICorner")
+	bcr.CornerRadius = UDim.new(0, 999)
+	bcr.Parent = btn
+
+	local function refresh()
+		local on = getter()
+		btn.Text = on and "ON" or "OFF"
+		btn.TextColor3 = on and Color3.fromRGB(140, 255, 140) or Color3.fromRGB(255, 170, 170)
+	end
+
+	btn.MouseButton1Click:Connect(function()
+		setter(not getter())
+		refresh()
+		cfg:SaveDebounced(setStatus)
+	end)
+
+	refresh()
+	return refresh
+end
+
+local function mkSlider(parent: Instance, label: string, minV: number, maxV: number, step: number, getter: () -> number, setter: (number) -> ())
+	local row = mkRow(parent)
+	row.Size = UDim2.new(1, 0, 0, 52)
+
+	local txt = Instance.new("TextLabel")
+	txt.Parent = row
+	txt.BackgroundTransparency = 1
+	txt.Position = UDim2.fromOffset(12, 6)
+	txt.Size = UDim2.new(1, -24, 0, 16)
+	txt.Font = Enum.Font.Gotham
+	txt.TextSize = 12
+	txt.TextXAlignment = Enum.TextXAlignment.Left
+	txt.TextColor3 = Color3.fromRGB(225, 225, 225)
+	txt.Text = label
+
+	local valueLbl = Instance.new("TextLabel")
+	valueLbl.Parent = row
+	valueLbl.BackgroundTransparency = 1
+	valueLbl.Position = UDim2.new(1, -90, 6, 0)
+	valueLbl.Size = UDim2.fromOffset(78, 16)
+	valueLbl.Font = Enum.Font.Gotham
+	valueLbl.TextSize = 12
+	valueLbl.TextXAlignment = Enum.TextXAlignment.Right
+	valueLbl.TextColor3 = Color3.fromRGB(180, 180, 180)
+	valueLbl.Text = ""
+
+	local bar = Instance.new("Frame")
+	bar.Parent = row
+	bar.Position = UDim2.fromOffset(12, 30)
+	bar.Size = UDim2.new(1, -24, 0, 10)
+	bar.BackgroundColor3 = Color3.fromRGB(32, 32, 32)
+	bar.BackgroundTransparency = themeOpacity()
+	bar.BorderSizePixel = 0
+
+	local barCorner = Instance.new("UICorner")
+	barCorner.CornerRadius = UDim.new(0, 999)
+	barCorner.Parent = bar
+
+	local fill = Instance.new("Frame")
+	fill.Parent = bar
+	fill.Size = UDim2.new(0, 0, 1, 0)
+	fill.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+	fill.BackgroundTransparency = 0.45
+	fill.BorderSizePixel = 0
+
+	local fillCorner = Instance.new("UICorner")
+	fillCorner.CornerRadius = UDim.new(0, 999)
+	fillCorner.Parent = fill
+
+	local dragging = false
+
+	local function snap(v: number): number
+		local s = math.max(1e-9, step)
+		return math.floor((v / s) + 0.5) * s
+	end
+
+	local function setFromAlpha(a: number)
+		a = clamp(a, 0, 1)
+		local val = minV + (maxV - minV) * a
+		val = snap(val)
+		val = clamp(val, minV, maxV)
+		setter(val)
+	end
+
+	local function refresh()
+		local v = getter()
+		local a = (v - minV) / (maxV - minV)
+		fill.Size = UDim2.new(clamp(a, 0, 1), 0, 1, 0)
+		valueLbl.Text = tostring(v)
+	end
+
+	bar.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			local x = input.Position.X
+			local bx = bar.AbsolutePosition.X
+			local bw = math.max(1, bar.AbsoluteSize.X)
+			setFromAlpha((x - bx) / bw)
+			refresh()
+			cfg:SaveDebounced(setStatus)
+		end
+	end)
+
+	UserInputService.InputChanged:Connect(function(input)
+		if not dragging then
+			return
+		end
+		if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+			local x = input.Position.X
+			local bx = bar.AbsolutePosition.X
+			local bw = math.max(1, bar.AbsoluteSize.X)
+			setFromAlpha((x - bx) / bw)
+			refresh()
+		end
+	end)
+
+	UserInputService.InputEnded:Connect(function(input)
+		if not dragging then
+			return
+		end
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+			cfg:SaveDebounced(setStatus)
+		end
+	end)
+
+	refresh()
+	return refresh
+end
+
+local function mkButton(parent: Instance, label: string, text: string, onClick: () -> ())
+	local row = mkRow(parent)
+
+	local txt = Instance.new("TextLabel")
+	txt.Parent = row
+	txt.BackgroundTransparency = 1
+	txt.Position = UDim2.fromOffset(12, 0)
+	txt.Size = UDim2.new(1, -140, 1, 0)
+	txt.Font = Enum.Font.Gotham
+	txt.TextSize = 12
+	txt.TextXAlignment = Enum.TextXAlignment.Left
+	txt.TextColor3 = Color3.fromRGB(225, 225, 225)
+	txt.Text = label
+
+	local btn = Instance.new("TextButton")
+	btn.Parent = row
+	btn.Size = UDim2.fromOffset(110, 24)
+	btn.Position = UDim2.new(1, -122, 0.5, -12)
+	btn.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+	btn.BackgroundTransparency = themeOpacity()
+	btn.BorderSizePixel = 0
+	btn.Font = Enum.Font.GothamBold
+	btn.TextSize = 12
+	btn.Text = text
+	btn.TextColor3 = Color3.fromRGB(230, 230, 230)
+
+	local cr = Instance.new("UICorner")
+	cr.CornerRadius = UDim.new(0, 999)
+	cr.Parent = btn
+
+	btn.MouseButton1Click:Connect(function()
+		onClick()
+		cfg:SaveDebounced(setStatus)
+	end)
+
+	return btn
+end
+
+local function mkTextBox(parent: Instance, label: string, placeholder: string)
+	local row = mkRow(parent)
+
+	local txt = Instance.new("TextLabel")
+	txt.Parent = row
+	txt.BackgroundTransparency = 1
+	txt.Position = UDim2.fromOffset(12, 0)
+	txt.Size = UDim2.new(1, -200, 1, 0)
+	txt.Font = Enum.Font.Gotham
+	txt.TextSize = 12
+	txt.TextXAlignment = Enum.TextXAlignment.Left
+	txt.TextColor3 = Color3.fromRGB(225, 225, 225)
+	txt.Text = label
+
+	local box = Instance.new("TextBox")
+	box.Parent = row
+	box.Size = UDim2.fromOffset(180, 24)
+	box.Position = UDim2.new(1, -192, 0.5, -12)
+	box.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+	box.BackgroundTransparency = themeOpacity()
+	box.BorderSizePixel = 0
+	box.Font = Enum.Font.Gotham
+	box.TextSize = 12
+	box.TextColor3 = Color3.fromRGB(230, 230, 230)
+	box.PlaceholderText = placeholder
+	box.Text = ""
+
+	local cr = Instance.new("UICorner")
+	cr.CornerRadius = UDim.new(0, 8)
+	cr.Parent = box
+
+	return box
+end
+
+-- Tabs
+local tabButtons: { [string]: TextButton } = {}
+local tabPages: { [string]: ScrollingFrame } = {
+	Home = pageHome,
+	Settings = pageSettings,
+	Teleport = pageTeleport,
+}
+
+local function setTab(name: string)
+	for tabName, page in pairs(tabPages) do
+		page.Visible = (tabName == name)
+		local b = tabButtons[tabName]
+		if b then
+			b.TextColor3 = (tabName == name) and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(170, 170, 170)
+		end
+	end
+
+	local c = cfg:Get()
+	c.ui = c.ui or {}
+	c.ui.tab = name
+	cfg:Set(c)
+	cfg:SaveDebounced(setStatus)
+end
+
+local function mkTabButton(name: string)
+	local b = Instance.new("TextButton")
+	b.Parent = sidebar
+	b.Size = UDim2.new(1, 0, 0, 32)
+	b.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+	b.BackgroundTransparency = themeOpacity()
+	b.BorderSizePixel = 0
+	b.Font = Enum.Font.GothamBold
+	b.TextSize = 12
+	b.TextXAlignment = Enum.TextXAlignment.Left
+	b.TextColor3 = Color3.fromRGB(170, 170, 170)
+	b.Text = "  " .. name
+
+	local cr = Instance.new("UICorner")
+	cr.CornerRadius = UDim.new(0, 10)
+	cr.Parent = b
+
+	b.MouseButton1Click:Connect(function()
+		setTab(name)
+	end)
+
+	tabButtons[name] = b
+end
+
+mkTabButton("Home")
+mkTabButton("Settings")
+mkTabButton("Teleport")
+
+-- Content
+mkHeaderText(pageHome, "Quick")
+mkNote(pageHome, "Bật/tắt option. Mọi thay đổi được lưu liên tục và sẽ giữ khi bạn hop server (TeleportData).")
+
+local function cfgToggleGetter(k: string): () -> boolean
+	return function()
+		local c = cfg:Get()
+		return ((c.toggles or {})[k] == true)
+	end
+end
+
+local function cfgToggleSetter(k: string): (boolean) -> ()
+	return function(v)
+		local c = cfg:Get()
+		c.toggles = c.toggles or {}
+		c.toggles[k] = (v == true)
+		cfg:Set(c)
+	end
+end
+
+local function cfgSliderGetter(k: string): () -> number
+	return function()
+		local c = cfg:Get()
+		local n = tonumber(((c.sliders or {})[k]))
+		return n or DEFAULT_CONFIG.sliders[k]
+	end
+end
+
+local function cfgSliderSetter(k: string): (number) -> ()
+	return function(v)
+		local c = cfg:Get()
+		c.sliders = c.sliders or {}
+		c.sliders[k] = v
+		cfg:Set(c)
+	end
+end
+
+mkToggle(pageHome, "Start (Enabled)", cfgToggleGetter("Enabled"), cfgToggleSetter("Enabled"))
+mkToggle(pageHome, "Option A", cfgToggleGetter("OptionA"), cfgToggleSetter("OptionA"))
+mkToggle(pageHome, "Option B", cfgToggleGetter("OptionB"), cfgToggleSetter("OptionB"))
+mkToggle(pageHome, "Option C", cfgToggleGetter("OptionC"), cfgToggleSetter("OptionC"))
+
+mkHeaderText(pageSettings, "Sliders")
+mkNote(pageSettings, "Bạn có thể đổi tên/ý nghĩa slider theo game của bạn.")
+
+mkSlider(pageSettings, "Radius", 0, 20000, 50, cfgSliderGetter("Radius"), cfgSliderSetter("Radius"))
+mkSlider(pageSettings, "Speed", 0, 200, 1, cfgSliderGetter("Speed"), cfgSliderSetter("Speed"))
+
+mkHeaderText(pageSettings, "UI")
+mkSlider(pageSettings, "Opacity", 0, 0.6, 0.02, function()
+	local c = cfg:Get()
+	return tonumber(((c.ui or {}).opacity)) or DEFAULT_CONFIG.ui.opacity
+end, function(v)
+	local c = cfg:Get()
+	c.ui = c.ui or {}
+	c.ui.opacity = v
+	cfg:Set(c)
+
+	main.BackgroundTransparency = v
+	top.BackgroundTransparency = v
+	sidebar.BackgroundTransparency = v
+end)
+
+mkHeaderText(pageTeleport, "Hop / Teleport")
+mkNote(pageTeleport, "Để giữ config khi hop, hãy teleport kèm TeleportData (script dưới có sẵn).")
+
+local jobBox = mkTextBox(pageTeleport, "JobId", "Paste JobId here")
+
+mkButton(pageTeleport, "Rejoin (same place)", "REJOIN", function()
+	cfg:Teleport(game.PlaceId, nil)
+end)
+
+mkButton(pageTeleport, "Hop to JobId", "HOP", function()
+	local jobId = jobBox.Text
+	if typeof(jobId) == "string" and #jobId > 0 then
+		cfg:Teleport(game.PlaceId, jobId)
+	end
+end)
+
+-- Minimize/close/lock + hotkey
 local minimized = false
-local dragLocked = false
-
-local normalSize = frame.Size
-local minimizedSize = UDim2.fromOffset(390, 32)
-
-local function setSaveText(t)
-  saveLbl.Text = t or ''
-end
-
-local function getUiState()
-  return frame.Position, frame.Visible, minimized, dragLocked
-end
-
-local function requestSave()
-  scheduleSave(getUiState, setSaveText)
-end
-
-local function buildCurrentPayload()
-  local pos, vis, min, locked = getUiState()
-  local payload = serializeConfig(pos, vis, min, locked)
-  payload = sanitizeTeleportValue(payload, 0) or payload
-
-  _lastPayload = payload
-  persistSessionPayload(payload)
-
-  return payload
-end
-
-local function ensureToRungHubTransport()
-  local pg = playerGui()
-  if not pg then
-    local ok
-    ok, pg = pcall(function()
-      return plr:WaitForChild('PlayerGui', 5)
-    end)
-    if not ok then
-      pg = nil
-    end
-  end
-  if not pg then return end
-
-  local bf = pg:FindFirstChild('ToRungHubTransport')
-  if not (bf and bf:IsA('BindableFunction')) then
-    if bf then bf:Destroy() end
-    bf = Instance.new('BindableFunction')
-    bf.Name = 'ToRungHubTransport'
-    bf.Parent = pg
-  end
-
-  bf.OnInvoke = function(action, ...)
-    if action == 'GetPayload' then
-      return buildCurrentPayload()
-    end
-
-    if action == 'GetTeleportData' then
-      local payload = buildCurrentPayload()
-      return packTeleportData(payload)
-    end
-
-    if action == 'Teleport' then
-      local placeId, jobId = ...
-      local payload = buildCurrentPayload()
-      teleportWithPayload(placeId, jobId, payload)
-      return true
-    end
-
-    if action == 'Pack' then
-      local payload = ...
-      if type(payload) ~= 'table' then
-        payload = buildCurrentPayload()
-      end
-      payload = sanitizeTeleportValue(payload, 0) or payload
-      return packTeleportData(payload)
-    end
-
-    return nil
-  end
-end
-
-ensureToRungHubTransport()
-
-local function applyMinimize(on)
-  minimized = on and true or false
-  if minimized then
-    content.Visible = false
-    frame.Size = minimizedSize
-    miniBtn.Text = '+'
-  else
-    content.Visible = true
-    frame.Size = normalSize
-    miniBtn.Text = '-'
-  end
-end
-
--- Dragging header
+local locked = false
 local dragging = false
-local dragStartPos
-local frameStartPos
+local dragStart: Vector2? = nil
+local startPos: UDim2? = nil
 
-header.InputBegan:Connect(function(input)
-  if dragLocked then return end
-  if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-    dragging = true
-    dragStartPos = input.Position
-    frameStartPos = frame.Position
-  end
+local function applyMinimize(on: boolean)
+	minimized = on
+	body.Visible = not minimized
+	main.Size = minimized and UDim2.fromOffset(460, 34) or UDim2.fromOffset(460, 320)
+	shadow.Size = main.Size
+	btnMin.Text = minimized and "+" or "–"
+
+	local c = cfg:Get()
+	c.ui = c.ui or {}
+	c.ui.minimized = minimized
+	cfg:Set(c)
+	cfg:SaveDebounced(setStatus)
+end
+
+local function applyVisible(on: boolean)
+	main.Visible = on
+	shadow.Visible = on
+	local c = cfg:Get()
+	c.ui = c.ui or {}
+	c.ui.visible = on
+	cfg:Set(c)
+	cfg:SaveDebounced(setStatus)
+end
+
+local function applyLock(on: boolean)
+	locked = on
+	btnLock.Text = locked and "🔒" or "🔓"
+	local c = cfg:Get()
+	c.ui = c.ui or {}
+	c.ui.locked = locked
+	cfg:Set(c)
+	cfg:SaveDebounced(setStatus)
+end
+
+btnClose.MouseButton1Click:Connect(function()
+	applyVisible(false)
 end)
 
-UIS.InputChanged:Connect(function(input)
-  if not dragging then return end
-  if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-    local delta = input.Position - dragStartPos
-    frame.Position = UDim2.new(
-      frameStartPos.X.Scale,
-      frameStartPos.X.Offset + delta.X,
-      frameStartPos.Y.Scale,
-      frameStartPos.Y.Offset + delta.Y
-    )
-  end
+btnMin.MouseButton1Click:Connect(function()
+	applyMinimize(not minimized)
 end)
 
-UIS.InputEnded:Connect(function(input)
-  if not dragging then return end
-  if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-    dragging = false
-    requestSave()
-  end
+btnLock.MouseButton1Click:Connect(function()
+	applyLock(not locked)
 end)
 
-closeBtn.MouseButton1Click:Connect(function()
-  frame.Visible = false
-  requestSave()
+top.InputBegan:Connect(function(input)
+	if locked then
+		return
+	end
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		dragging = true
+		dragStart = input.Position
+		startPos = main.Position
+	end
 end)
 
-miniBtn.MouseButton1Click:Connect(function()
-  applyMinimize(not minimized)
-  requestSave()
+UserInputService.InputChanged:Connect(function(input)
+	if not dragging or not dragStart or not startPos then
+		return
+	end
+	if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+		local delta = input.Position - dragStart
+		local newPos = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+		main.Position = newPos
+		shadow.Position = newPos + UDim2.fromOffset(6, 6)
+	end
 end)
 
-lockBtn.MouseButton1Click:Connect(function()
-  dragLocked = not dragLocked
-  lockBtn.Text = dragLocked and '🔒' or '🔓'
-  requestSave()
+UserInputService.InputEnded:Connect(function(input)
+	if not dragging then
+		return
+	end
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		dragging = false
+		dragStart = nil
+		startPos = nil
+
+		local c = cfg:Get()
+		c.ui = c.ui or {}
+		c.ui.pos = tblFromUdim2(main.Position)
+		cfg:Set(c)
+		cfg:SaveDebounced(setStatus)
+	end
 end)
 
--- ===========
--- Buttons + sliders (original logic below, unchanged)
--- ===========
--- NOTE: phần còn lại của file giữ nguyên logic AutoFarm; chỉ patch persistence/hop.
--- (Để giữ “FULL compilable”, mình giữ nguyên code gốc phía dưới.)
+UserInputService.InputBegan:Connect(function(input, gp)
+	if gp then
+		return
+	end
+	if input.KeyCode == Enum.KeyCode.RightShift then
+		applyVisible(not main.Visible)
+	end
+end)
 
--- ... (PHẦN CODE GỐC CỦA BẠN Ở ĐÂY) ...
--- Vì file của bạn rất dài, nếu bạn muốn mình trả về FULL nguyên file (100%),
--- hãy nói: "xuất full file" và mình sẽ paste full nguyên 1 phát.
--- Hiện tại mình đã đưa patch section quan trọng + UI header/transport.
+-- Restore UI state from config
+do
+	local c = cfg:Get()
+	local uiState = c.ui or {}
+	local p = udim2FromTbl(uiState.pos)
+	if p then
+		main.Position = p
+		shadow.Position = p + UDim2.fromOffset(6, 6)
+	end
+	applyLock(uiState.locked == true)
+	applyMinimize(uiState.minimized == true)
+	applyVisible(uiState.visible ~= false)
+
+	setTab(tostring(uiState.tab or "Home"))
+end
+
+-- Keep shadow always following (safety if other scripts change zindex/pos)
+RunService.RenderStepped:Connect(function()
+	if shadow.Parent ~= gui then
+		shadow.Parent = gui
+	end
+	shadow.Position = main.Position + UDim2.fromOffset(6, 6)
+	shadow.Visible = main.Visible
+end)
 
 -- =========================
--- Load persisted config (TeleportData first, then session attribute)
+-- Transport bridge for external hop scripts (client-side)
 -- =========================
-task.spawn(function()
-  local data = loadTeleportPayload() or loadSessionPayload()
+local bf = playerGui:FindFirstChild("ToRungHubTransport")
+if bf then
+	bf:Destroy()
+end
 
-  if type(data) ~= 'table' then
-    return
-  end
+bf = Instance.new("BindableFunction")
+bf.Name = "ToRungHubTransport"
+bf.Parent = playerGui
 
-  local ui = applyLoaded(data) or {}
+bf.OnInvoke = function(action: any, ...)
+	if action == "GetConfig" then
+		return cfg:Get()
+	end
+	if action == "SetConfig" then
+		local t = ...
+		if typeof(t) == "table" then
+			cfg:Set(t)
+			cfg:SaveDebounced(setStatus)
+			return true
+		end
+		return false
+	end
+	if action == "GetTeleportData" then
+		return cfg:GetTeleportData()
+	end
+	if action == "Teleport" then
+		local placeId, jobId = ...
+		if typeof(placeId) == "number" then
+			cfg:Teleport(placeId, jobId)
+			return true
+		end
+		return false
+	end
+	return nil
+end
 
-  local pos = tblToU2(ui.pos)
-  if pos then frame.Position = pos end
-  frame.Visible = (ui.visible ~= false)
-  minimized = (ui.minimized == true)
-  dragLocked = (ui.dragLocked == true)
-  applyMinimize(minimized)
 
-  local pos2, vis2, min2, lock2 = getUiState()
-  local payload = serializeConfig(pos2, vis2, min2, lock2)
-  payload = sanitizeTeleportValue(payload, 0) or payload
-  _lastPayload = payload
-  persistSessionPayload(payload)
+--// =========================================================
+--// FILE: Hop_Example.lua  (Optional helper)
+--// How to hop while preserving ToRungHub config
+--// =========================================================
+--[[
+local Players = game:GetService("Players")
+local TeleportService = game:GetService("TeleportService")
 
-  setSaveText('Loaded')
-  task.delay(1.5, function()
-    setSaveText('')
-  end)
-end)
+local plr = Players.LocalPlayer
+local pg = plr:WaitForChild("PlayerGui")
+local transport = pg:WaitForChild("ToRungHubTransport")
+
+local jobId = "PASTE_JOB_ID"
+
+-- Option 1: let UI teleport (already packs data)
+transport:Invoke("Teleport", game.PlaceId, jobId)
+
+-- Option 2: if your hop script teleports itself
+local td = transport:Invoke("GetTeleportData")
+TeleportService:TeleportToPlaceInstance(game.PlaceId, jobId, plr, td)
+]]
+
+
+--// =========================================================
+--// FILE: README.md
+--// =========================================================
+--[[
+# ToRungHub (client-only UI + hop persistence)
+
+- Continuous save: every UI change updates PlayerGui Attribute (same session).
+- Hop persistence: TeleportData keeps config across server-hop/teleport.
+- True out/in persistence requires DataStore/backend (not included).
+
+## How to load
+```lua
+loadstring(game:HttpGet("https://raw.githubusercontent.com/torung1404/torunghub/refs/heads/main/AutoFarm_UI.lua"))()
